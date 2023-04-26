@@ -150,7 +150,6 @@ class PPOTrainer(OnPolicyTrainer):
 
         # value loss
         values = self.critic(experience.sequences,
-                             action_mask=experience.action_mask,
                              attention_mask=experience.attention_mask)
         critic_loss = self.critic_loss_fn(values,
                                           experience.values,

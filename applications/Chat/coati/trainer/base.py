@@ -13,6 +13,10 @@ from .callbacks import Callback
 from .strategies import Strategy
 from .utils import CycledDataLoader, is_rank_0
 
+from torch import profiler
+from torch.profiler import ProfilerActivity
+
+import time as t
 
 class SLTrainer(ABC):
     """

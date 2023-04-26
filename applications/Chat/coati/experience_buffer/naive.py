@@ -25,11 +25,19 @@ class NaiveExperienceBuffer(ExperienceBuffer):
         self.items: List[BufferItem] = []
 
     @torch.no_grad()
-    def append(self, experience: Experience) -> None:
-        if self.cpu_offload:
-            experience.to_device(torch.device('cpu'))
-        items = split_experience_batch(experience)
-        self.items.extend(items)
+    def append(self, experience) -> None:
+        if isinstance(experience, Experience):
+            if self.cpu_offload:
+                experience.to_device(torch.device('cpu'))
+            items = split_experience_batch(experience)
+            self.items.extend(items)
+        
+        elif isinstance(experience, list):
+            for exp in experience:
+                exp.to_device(torch.device('cpu'))
+                item = exp_to_buffer_item(exp)
+                self.items.append(item)
+                
         if self.limit > 0:
             samples_to_remove = len(self.items) - self.limit
             if samples_to_remove > 0:
