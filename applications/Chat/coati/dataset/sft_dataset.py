@@ -13,12 +13,10 @@
 #    limitations under the License.
 
 import copy
-import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable, Dict, Sequence
 
 import torch
-import torch.distributed as dist
 import transformers
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -94,7 +92,7 @@ def _tokenize_fn(strings: Sequence[str],
     )
 
 
-def preprocess(
+def _preprocess(
     sources: Sequence[str],
     targets: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
@@ -109,6 +107,7 @@ def preprocess(
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
+        # FIXME: This is wrong if padding is 'left'!
         label[:source_len] = IGNORE_INDEX
     return dict(input_ids=input_ids, labels=labels)
 
@@ -135,7 +134,7 @@ class SupervisedDataset(Dataset):
         targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
 
         logger.info("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer, max_length)
+        data_dict = _preprocess(sources, targets, tokenizer, max_length)
 
         self.input_ids = data_dict["input_ids"]
         self.labels = data_dict["labels"]
