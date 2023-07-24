@@ -9,6 +9,7 @@ from .base import Experience, ExperienceMaker
 class NaiveExperienceMaker(ExperienceMaker):
     """
     Naive experience maker.
+    NOTE: Naive experience maker treats the whole sequence as a single step in MDP.
     """
 
     @torch.no_grad()
