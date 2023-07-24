@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from ..lora import LoRAModule
-from ..utils import masked_mean
 
 
 class Critic(LoRAModule):
@@ -31,13 +30,9 @@ class Critic(LoRAModule):
         self.value_head = value_head
         self.convert_to_lora()
 
-    def forward(self,
-                sequences: torch.LongTensor,
-                attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        # we have added a <eos> token at the end of each sequence
-        # so we can use the last hidden state to be the input of the marking linear layer to get the value score 
+    def forward(self, sequences: torch.LongTensor, attention_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         outputs = self.model(sequences, attention_mask=attention_mask)
         last_hidden_states = outputs['last_hidden_state']
-        value_prob = last_hidden_states[:, -1]
-        value = self.value_head(value_prob).squeeze(1) # ensure shape is (B)
-        return value
+        sentence_hidden_states = last_hidden_states[:, -1]
+        values = self.value_head(sentence_hidden_states).squeeze(1)  # ensure shape is (B, )
+        return values
