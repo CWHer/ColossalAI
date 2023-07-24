@@ -86,7 +86,7 @@ def main(args):
         elif rm_model_name == 'opt':
             critic = OPTCritic(pretrained=args.rm_pretrain, lora_rank=args.lora_rank)
         elif rm_model_name == 'llama':
-            critic = LlamaCritic(pretrained=args.rm_pretrain, lora_rank=args.lora_rank, use_action_mask=True)
+            critic = LlamaCritic(pretrained=args.rm_pretrain, lora_rank=args.lora_rank)
         else:
             raise ValueError(f'Unsupported reward model "{rm_model_name}"')
 
