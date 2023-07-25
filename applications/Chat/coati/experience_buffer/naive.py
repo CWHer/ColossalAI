@@ -1,5 +1,6 @@
 import random
-from typing import List
+import warnings
+from typing import List, Union
 
 import torch
 from coati.experience_maker.base import Experience
@@ -25,22 +26,22 @@ class NaiveExperienceBuffer(ExperienceBuffer):
         self.items: List[BufferItem] = []
 
     @torch.no_grad()
-    def append(self, experience) -> None:
-        if isinstance(experience, Experience):
+    def append(self, experiences: Union[Experience, List[Experience]]) -> None:
+        if isinstance(experiences, Experience):
             if self.cpu_offload:
-                experience.to_device(torch.device('cpu'))
-            items = split_experience_batch(experience)
+                experiences.to_device(torch.device('cpu'))
+            items = split_experience_batch(experiences)
             self.items.extend(items)
-        
-        elif isinstance(experience, list):
-            for exp in experience:
-                exp.to_device(torch.device('cpu'))
-                item = exp_to_buffer_item(exp)
-                self.items.append(item)
-                
+        elif isinstance(experiences, list):
+            for experience in experiences:
+                self.append(experience)
+        else:
+            raise ValueError(f'Unsupported input type "{type(experiences)}"')
+
         if self.limit > 0:
             samples_to_remove = len(self.items) - self.limit
             if samples_to_remove > 0:
+                warnings.warn(f'Experience buffer is full. Removing {samples_to_remove} samples.')
                 self.items = self.items[samples_to_remove:]
 
     def clear(self) -> None:

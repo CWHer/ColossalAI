@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, List, Union
 
 from coati.experience_maker.base import Experience
 
@@ -19,7 +19,7 @@ class ExperienceBuffer(ABC):
         self.limit = limit
 
     @abstractmethod
-    def append(self, experience: Experience) -> None:
+    def append(self, experiences: Union[Experience, List[Experience]]) -> None:
         pass
 
     @abstractmethod
