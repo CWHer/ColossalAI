@@ -1,6 +1,7 @@
 from typing import Dict, List
 
 import torch.nn as nn
+import torch.nn.functional as F
 from coati.experience_buffer import NaiveExperienceBuffer
 from coati.experience_maker import Experience, MultiStepExperienceMaker, NaiveExperienceMaker
 from coati.models.base import Actor, Critic, get_base_model
@@ -44,6 +45,9 @@ class PPOTrainer(OnPolicyTrainer):
         initial_model (Actor): the initial model in rlhf algorithm to generate reference logics to limit the update of actor
         actor_optim (Optimizer): the optimizer to use for actor model
         critic_optim (Optimizer): the optimizer to use for critic model
+        multistep_sequence (bool, defaults to False):
+            whether to treat a sequence as a whole or treat each token as a step in MDP
+            set multistep_sequence = True would use MultiStepExperienceMaker and cause different behavior in training
         kl_coef (float, defaults to 0.1): the coefficient of kl divergence loss
         train_batch_size (int, defaults to 8): the batch size to use for training
         buffer_limit (int, defaults to 0): the max_size limitation of buffer
@@ -67,7 +71,7 @@ class PPOTrainer(OnPolicyTrainer):
                  initial_model: Actor,
                  actor_optim: Optimizer,
                  critic_optim: Optimizer,
-                 multistep_rollout: bool = False,
+                 multistep_sequence: bool = False,
                  kl_coef: float = 0.1,
                  ptx_coef: float = 0.9,
                  train_batch_size: int = 8,
@@ -94,7 +98,8 @@ class PPOTrainer(OnPolicyTrainer):
         )
 
         self.generate_kwargs = _set_default_generate_kwargs(strategy, generate_kwargs, actor)
-        if not multistep_rollout:
+        self.multistep_sequence = multistep_sequence
+        if not self.multistep_sequence:
             self.experience_maker = NaiveExperienceMaker(actor, critic, reward_model, initial_model, kl_coef)
         else:
             self.experience_maker = MultiStepExperienceMaker(actor, critic, reward_model, initial_model, kl_coef)
@@ -126,20 +131,27 @@ class PPOTrainer(OnPolicyTrainer):
         self.actor.train()
         self.critic.train()
         # policy loss
-        num_actions = experience.action_mask.size(1)
-        actor_logits = self.actor(experience.sequences, experience.attention_mask)["logits"]
-        action_log_probs = calc_action_log_probs(actor_logits, experience.sequences, num_actions)
-        actor_loss = self.actor_loss_fn(action_log_probs,
-                                        experience.action_log_probs,
-                                        experience.advantages,
-                                        action_mask=experience.action_mask)
+        if not self.multistep_sequence:
+            num_actions = experience.action_mask.size(1)
+            actor_logits = self.actor(experience.sequences, experience.attention_mask)["logits"]
+            action_log_probs = calc_action_log_probs(actor_logits, experience.sequences, num_actions)
+            actor_loss = self.actor_loss_fn(action_log_probs,
+                                            experience.action_log_probs,
+                                            experience.advantages,
+                                            action_mask=experience.action_mask)
+        else:
+            actor_logits = self.actor(experience.sequences, experience.attention_mask)["logits"][:, -1]
+            action_log_probs = F.log_softmax(actor_logits, dim=-1)
+            actor_loss = self.actor_loss_fn(action_log_probs,
+                                            experience.action_log_probs,
+                                            experience.advantages)
+            raise NotImplementedError("Debug this part")
 
         # ptx loss
         if self.ptx_coef != 0:
             batch = self.pretrain_dataloader.next()
             batch = to_device(batch, self.device)
-            ptx_log_probs = self.actor(batch['input_ids'],
-                                       attention_mask=batch['attention_mask'])['logits']
+            ptx_log_probs = self.actor(batch['input_ids'], batch['attention_mask'])['logits']
             ptx_loss = self.ptx_loss_fn(ptx_log_probs, batch['labels'])
             actor_loss = ptx_loss * self.ptx_coef + actor_loss * (1 - self.ptx_coef)
 
