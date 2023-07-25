@@ -163,6 +163,7 @@ def main(args):
         initial_model,
         actor_optim,
         critic_optim,
+        multistep_rollout=args.use_multistep_rollout,
         kl_coef=args.kl_coef,
         ptx_coef=args.ptx_coef,
         train_batch_size=args.train_batch_size,
@@ -207,6 +208,7 @@ if __name__ == '__main__':
     parser.add_argument('--rm_pretrain', type=str, default=None)
     parser.add_argument('--save_path', type=str, default='actor_checkpoint_prompts')
     parser.add_argument('--need_optim_ckpt', type=bool, default=False)
+    parser.add_argument('--use_multistep_rollout', default=False, action='store_true')
     parser.add_argument('--num_episodes', type=int, default=10)
     parser.add_argument('--num_collect_steps', type=int, default=10)
     parser.add_argument('--num_update_steps', type=int, default=5)

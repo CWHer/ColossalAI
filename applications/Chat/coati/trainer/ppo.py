@@ -2,13 +2,12 @@ from typing import Dict, List
 
 import torch.nn as nn
 from coati.experience_buffer import NaiveExperienceBuffer
-from coati.experience_maker import Experience, NaiveExperienceMaker
+from coati.experience_maker import Experience, MultiStepExperienceMaker, NaiveExperienceMaker
 from coati.models.base import Actor, Critic, get_base_model
 from coati.models.loss import GPTLMLoss, PolicyLoss, ValueLoss
 from coati.models.utils import calc_action_log_probs
-from torch import Tensor
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DistributedSampler
 from tqdm import tqdm
 
 from colossalai.utils import get_current_device
@@ -20,8 +19,8 @@ from .utils import is_rank_0, to_device
 
 
 def _set_default_generate_kwargs(strategy: Strategy, generate_kwargs: dict, actor: Actor) -> Dict:
-    unwrapper_model = strategy.unwrap_model(actor)
-    hf_model = get_base_model(unwrapper_model)
+    unwrapped_model = strategy.unwrap_model(actor)
+    hf_model = get_base_model(unwrapped_model)
     new_kwargs = {**generate_kwargs}
     # use huggingface models method directly
     if 'prepare_inputs_fn' not in generate_kwargs and hasattr(hf_model, 'prepare_inputs_for_generation'):
@@ -68,6 +67,7 @@ class PPOTrainer(OnPolicyTrainer):
                  initial_model: Actor,
                  actor_optim: Optimizer,
                  critic_optim: Optimizer,
+                 multistep_rollout: bool = False,
                  kl_coef: float = 0.1,
                  ptx_coef: float = 0.9,
                  train_batch_size: int = 8,
@@ -94,8 +94,10 @@ class PPOTrainer(OnPolicyTrainer):
         )
 
         self.generate_kwargs = _set_default_generate_kwargs(strategy, generate_kwargs, actor)
-        self.experience_maker = NaiveExperienceMaker(actor, critic, reward_model, initial_model, kl_coef)
-        self.offload_inference_models = offload_inference_models
+        if not multistep_rollout:
+            self.experience_maker = NaiveExperienceMaker(actor, critic, reward_model, initial_model, kl_coef)
+        else:
+            self.experience_maker = MultiStepExperienceMaker(actor, critic, reward_model, initial_model, kl_coef)
 
         self.actor = actor
         self.critic = critic
@@ -108,6 +110,7 @@ class PPOTrainer(OnPolicyTrainer):
         self.actor_optim = actor_optim
         self.critic_optim = critic_optim
 
+        self.offload_inference_models = offload_inference_models
         self.device = get_current_device()
 
     def _make_experience(self, collect_step: int) -> Experience:
