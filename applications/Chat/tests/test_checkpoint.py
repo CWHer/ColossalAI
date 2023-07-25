@@ -28,8 +28,8 @@ def train_step(strategy: Strategy,
                batch_size: int = 8):
     data = get_data(batch_size)
     action_mask = torch.ones_like(data["attention_mask"], dtype=torch.bool)
-    actor_output = actor(data["input_ids"], data["attention_mask"])
-    action_log_probs = calc_action_log_probs(actor_output, data["input_ids"], action_mask.size(1))
+    actor_logits = actor(data["input_ids"], data["attention_mask"])["logits"]
+    action_log_probs = calc_action_log_probs(actor_logits, data["input_ids"], action_mask.size(1))
     loss = action_log_probs.sum()
     strategy.backward(loss, actor, actor_optim)
     strategy.optimizer_step(actor_optim)

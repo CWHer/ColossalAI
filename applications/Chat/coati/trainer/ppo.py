@@ -124,8 +124,8 @@ class PPOTrainer(OnPolicyTrainer):
         self.critic.train()
         # policy loss
         num_actions = experience.action_mask.size(1)
-        actor_output = self.actor(experience.sequences, attention_mask=experience.attention_mask)
-        action_log_probs = calc_action_log_probs(actor_output, experience.sequences, num_actions)
+        actor_logits = self.actor(experience.sequences, experience.attention_mask)["logits"]
+        action_log_probs = calc_action_log_probs(actor_logits, experience.sequences, num_actions)
         actor_loss = self.actor_loss_fn(action_log_probs,
                                         experience.action_log_probs,
                                         experience.advantages,

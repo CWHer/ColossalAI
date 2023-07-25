@@ -41,10 +41,10 @@ class NaiveExperienceMaker(ExperienceMaker):
             action_mask = F.pad(action_mask, (1, -1), value=True)  # shift right by 1, include eos token
         attention_mask = torch.cat([attention_mask, action_mask], dim=-1)
 
-        actor_output = self.actor(sequences, attention_mask)
-        action_log_probs = calc_action_log_probs(actor_output, sequences, num_actions)
-        base_model_output = self.initial_model(sequences, attention_mask)
-        base_action_log_probs = calc_action_log_probs(base_model_output, sequences, num_actions)
+        actor_logits = self.actor(sequences, attention_mask)["logits"]
+        action_log_probs = calc_action_log_probs(actor_logits, sequences, num_actions)
+        base_model_logits = self.initial_model(sequences, attention_mask)["logits"]
+        base_action_log_probs = calc_action_log_probs(base_model_logits, sequences, num_actions)
         value = self.critic(sequences, attention_mask)
         r = self.reward_model(sequences, attention_mask)
         reward = compute_reward(r, self.kl_coef, action_log_probs, base_action_log_probs, action_mask=action_mask)
