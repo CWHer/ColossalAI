@@ -24,7 +24,10 @@ class NaiveExperienceMaker(ExperienceMaker):
         self.reward_model.eval()
 
         # generate sequences
-        sequences = generate(self.actor, input_ids, **generate_kwargs)
+        sequences = generate(self.actor,
+                             input_ids,
+                             attention_mask=attention_mask,
+                             **generate_kwargs)
 
         # calculate auxiliary tensors
         input_len = input_ids.size(1)
