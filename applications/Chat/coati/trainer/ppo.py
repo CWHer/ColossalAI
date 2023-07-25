@@ -116,12 +116,8 @@ class PPOTrainer(OnPolicyTrainer):
             # TODO(ver217): this may be controlled by strategy if they are prepared by strategy
             self.experience_maker.initial_model.to(self.device)
             self.experience_maker.reward_model.to(self.device)
-        if isinstance(prompts, Tensor):
-            return self.experience_maker.make_experience(prompts, **self.generate_kwargs)
-        elif isinstance(prompts, dict):
-            return self.experience_maker.make_experience(**prompts, **self.generate_kwargs)
-        else:
-            raise ValueError(f'Unsupported input type "{type(prompts)}"')
+        assert isinstance(prompts, dict), f'Unsupported input type "{type(prompts)}"'
+        return self.experience_maker.make_experience(**prompts, **self.generate_kwargs)
 
     def _training_step(self, experience: Experience) -> Dict[str, float]:
         self.actor.train()

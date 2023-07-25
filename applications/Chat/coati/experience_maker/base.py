@@ -73,5 +73,9 @@ class ExperienceMaker(ABC):
         self.kl_coef = kl_coef
 
     @abstractmethod
-    def make_experience(self, input_ids: torch.Tensor, **generate_kwargs) -> Experience:
+    def make_experience(self,
+                        input_ids: torch.Tensor,
+                        attention_mask: torch.Tensor,
+                        **generate_kwargs
+                        ) -> Experience:
         pass
