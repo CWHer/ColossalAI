@@ -4,9 +4,9 @@ import torch
 import torch.nn.functional as F
 
 
-def _compute_approx_kl(log_probs: torch.Tensor,
-                       log_probs_base: torch.Tensor,
-                       action_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+def compute_approx_kl(log_probs: torch.Tensor,
+                      log_probs_base: torch.Tensor,
+                      action_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     Compute the approximate KL divergence between two distributions.
     Schulman blog: http://joschu.net/blog/kl-approx.html
@@ -33,7 +33,7 @@ def compute_reward(r: Union[torch.Tensor, float],
                    action_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     if kl_coef <= 0.0:
         return r
-    kl = _compute_approx_kl(log_probs, log_probs_base, action_mask=action_mask)
+    kl = compute_approx_kl(log_probs, log_probs_base, action_mask=action_mask)
     reward = r - kl_coef * kl
     return reward
 
