@@ -271,12 +271,21 @@ class BertPolicy(Policy):
             else:
                 stage_index = Policy.get_stage_index(layers_per_stage, stage_manager.stage)
 
-            method_replacement = {
-                "forward": partial(
-                    new_forward, stage_manager=stage_manager, stage_index=stage_index, shard_config=self.shard_config
-                )
-            }
-
+            if num_model_chunks == 1:
+                method_replacement = {
+                    "forward": partial(
+                        new_forward,
+                        stage_manager=stage_manager,
+                        stage_index=stage_index,
+                        shard_config=self.shard_config,
+                    )
+                }
+            # for interleaved, stage index for each forward is chosen in scheduler
+            else:
+                self.scheduler.layers = stage_index
+                method_replacement = {
+                    "forward": partial(new_forward, stage_manager=stage_manager, shard_config=self.shard_config)
+                }
             self.append_or_create_method_replacement(
                 description=method_replacement, policy=policy, target_key=model_cls
             )
@@ -298,7 +307,7 @@ class BertPolicy(Policy):
         layers_per_stage = self.distribute_layers(
             len(module.encoder.layer), stage_manager.num_stages * num_model_chunks
         )
-        if stage_manager.is_first_stage():
+        if stage_manager.is_first_device():
             held_layers.append(module.embeddings)
         if num_model_chunks > 1:
             stage_index = Policy.get_stage_index(
@@ -316,7 +325,7 @@ class BertPolicy(Policy):
             start_idx, end_idx = stage_index
             held_layers.extend(module.encoder.layer[start_idx:end_idx])
 
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_device():
             held_layers.append(module.pooler)
 
         return held_layers
@@ -493,7 +502,7 @@ class BertForSequenceClassificationPolicy(BertPolicy):
         """
         held_layers = super().get_held_layers()
         stage_manager = self.pipeline_stage_manager
-        if stage_manager.is_last_stage():
+        if stage_manager.is_last_device():
             held_layers.append(self.model.dropout)
             held_layers.append(self.model.classifier)
         return held_layers
