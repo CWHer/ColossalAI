@@ -56,6 +56,8 @@ class ParallelContext(metaclass=SingletonMeta):
         self._verbose = False
         self._logger = None
 
+        self.grad_checkpoint_ratio = 1.0
+
     @property
     def config(self):
         return self._config

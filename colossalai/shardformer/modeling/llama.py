@@ -131,6 +131,14 @@ class LlamaPipelineForwards:
         next_decoder_cache = () if use_cache else None
 
         start_idx, end_idx = stage_index[0], stage_index[1]
+
+        if self.gradient_checkpointing and self.training:
+            from colossalai.legacy.core import global_context as gpc
+            assert hasattr(gpc, "grad_checkpoint_ratio")
+            grad_checkpoint_ratio = gpc.grad_checkpoint_ratio
+            assert 0 < grad_checkpoint_ratio <= 1
+            num_ckpt_layers = grad_checkpoint_ratio * (end_idx - start_idx)
+
         for idx, decoder_layer in enumerate(self.layers[start_idx:end_idx], start=start_idx):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -146,13 +154,23 @@ class LlamaPipelineForwards:
 
                     return custom_forward
 
-                layer_outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(decoder_layer),
-                    hidden_states,
-                    attention_mask,
-                    position_ids,
-                    None,
-                )
+                if idx - start_idx + 1 <= num_ckpt_layers:
+                    layer_outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(decoder_layer),
+                        hidden_states,
+                        attention_mask,
+                        position_ids,
+                        None,
+                    )
+                else:
+                    layer_outputs = decoder_layer(
+                        hidden_states,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_value=past_key_value,
+                        output_attentions=output_attentions,
+                        use_cache=use_cache,
+                    )
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
