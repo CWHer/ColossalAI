@@ -1,5 +1,6 @@
 # part of code modified from https://github.com/tunib-ai/parallelformers
 
+import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -9,6 +10,7 @@ import torch.nn as nn
 from torch import Tensor
 from torch.nn import Module
 
+from colossalai.legacy.core import global_context as gpc
 from colossalai.pipeline.stage_manager import PipelineStageManager
 
 from ..layer.normalization import BaseLayerNorm
@@ -199,6 +201,12 @@ class Policy(ABC):
 
     @staticmethod
     def distribute_layers(num_layers: int, num_stages: int) -> List[int]:
+        if hasattr(gpc, "llama_pp_shard_config"):
+            warnings.warn("Using llama_pp_shard_config from global context")
+            assert gpc.llama_pp_shard_config["num_devices"] == num_stages
+            assert gpc.llama_pp_shard_config["num_layers"] == num_layers
+            return gpc.llama_pp_shard_config["num_layers_per_device"]
+
         """Divide layers into stages"""
         quotient = num_layers // num_stages
         remainder = num_layers % num_stages

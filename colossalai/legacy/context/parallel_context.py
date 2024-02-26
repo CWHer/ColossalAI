@@ -58,6 +58,17 @@ class ParallelContext(metaclass=SingletonMeta):
 
         self.grad_checkpoint_ratio = 1.0
 
+        # self.llama_pp_shard_config = {
+        #     "num_layers": 80,
+        #     "num_devices": 8,
+        #     "num_layers_per_device": [9, 9, 9, 10, 11, 10, 11, 11],
+        #     "num_ckpt_per_device": [4, 4, 2, 2, 0, 0, 0, 0],
+        # }
+        # assert self.llama_pp_shard_config["num_layers"] == sum(self.llama_pp_shard_config["num_layers_per_device"])
+        # self.grad_checkpoint_ratio = (
+        #     sum(self.llama_pp_shard_config["num_ckpt_per_device"]) / self.llama_pp_shard_config["num_layers"]
+        # )
+
     @property
     def config(self):
         return self._config

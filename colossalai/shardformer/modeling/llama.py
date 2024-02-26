@@ -134,10 +134,15 @@ class LlamaPipelineForwards:
 
         if self.gradient_checkpointing and self.training:
             from colossalai.legacy.core import global_context as gpc
+
             assert hasattr(gpc, "grad_checkpoint_ratio")
             grad_checkpoint_ratio = gpc.grad_checkpoint_ratio
             assert 0 < grad_checkpoint_ratio <= 1
             num_ckpt_layers = grad_checkpoint_ratio * (end_idx - start_idx)
+
+            if hasattr(gpc, "llama_pp_shard_config"):
+                num_ckpt_layers = gpc.llama_pp_shard_config["num_ckpt_per_device"][stage_manager.stage]
+                warnings.warn("Using num_ckpt_per_device from gpc.llama_pp_shard_config")
 
         for idx, decoder_layer in enumerate(self.layers[start_idx:end_idx], start=start_idx):
             if output_hidden_states:
