@@ -34,7 +34,7 @@ from colossalai.zero.low_level import LowLevelZeroOptimizer
 
 from .pp_plugin_base import PipelinePluginBase
 
-DP_AXIS, PP_AXIS, TP_AXIS = 0, 1, 2
+DP_AXIS, PP_AXIS, TP_AXIS = 1, 0, 2
 
 
 def _convert_floating_point(x, dtype: torch.dtype = torch.float16):
@@ -981,7 +981,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         self.enable_flash_attention = enable_flash_attention
         self.enable_jit_fused = enable_jit_fused
         self.enable_sequence_parallelism = enable_sequence_parallelism
-        self.pg_mesh = ProcessGroupMesh(self.dp_size, self.pp_size, self.tp_size)
+        self.pg_mesh = ProcessGroupMesh(self.pp_size, self.dp_size, self.tp_size)
         self.stage_manager = None
         self.schedule = None
         self.custom_policy = custom_policy
