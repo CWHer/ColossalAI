@@ -1,0 +1,75 @@
+diff --git a/colossalai/legacy/context/parallel_context.py b/colossalai/legacy/context/parallel_context.py
+index 85fd68bb..be0b8b4f 100644
+--- a/colossalai/legacy/context/parallel_context.py
++++ b/colossalai/legacy/context/parallel_context.py
+@@ -58,6 +58,17 @@ class ParallelContext(metaclass=SingletonMeta):
+ 
+         self.grad_checkpoint_ratio = 1.0
+ 
++        self.llama_pp_shard_config = {
++            "num_layers": 80,
++            "num_devices": 8,
++            "num_layers_per_device": [9, 9, 9, 10, 11, 10, 11, 11],
++            "num_ckpt_per_device": [4, 4, 2, 2, 0, 0, 0, 0],
++        }
++        assert self.llama_pp_shard_config["num_layers"] == sum(self.llama_pp_shard_config["num_layers_per_device"])
++        self.grad_checkpoint_ratio = (
++            sum(self.llama_pp_shard_config["num_ckpt_per_device"]) / self.llama_pp_shard_config["num_layers"]
++        )
++
+     @property
+     def config(self):
+         return self._config
+diff --git a/colossalai/shardformer/modeling/llama.py b/colossalai/shardformer/modeling/llama.py
+index 2980f5bf..88b352fc 100644
+--- a/colossalai/shardformer/modeling/llama.py
++++ b/colossalai/shardformer/modeling/llama.py
+@@ -134,11 +134,16 @@ class LlamaPipelineForwards:
+ 
+         if self.gradient_checkpointing and self.training:
+             from colossalai.legacy.core import global_context as gpc
++
+             assert hasattr(gpc, "grad_checkpoint_ratio")
+             grad_checkpoint_ratio = gpc.grad_checkpoint_ratio
+             assert 0 < grad_checkpoint_ratio <= 1
+             num_ckpt_layers = grad_checkpoint_ratio * (end_idx - start_idx)
+ 
++            if hasattr(gpc, "llama_pp_shard_config"):
++                num_ckpt_layers = gpc.llama_pp_shard_config["num_ckpt_per_device"][stage_manager.stage]
++                warnings.warn("Using num_ckpt_per_device from gpc.llama_pp_shard_config")
++
+         for idx, decoder_layer in enumerate(self.layers[start_idx:end_idx], start=start_idx):
+             if output_hidden_states:
+                 all_hidden_states += (hidden_states,)
+diff --git a/colossalai/shardformer/policies/base_policy.py b/colossalai/shardformer/policies/base_policy.py
+index 1d2b7a57..e78dc2ba 100644
+--- a/colossalai/shardformer/policies/base_policy.py
++++ b/colossalai/shardformer/policies/base_policy.py
+@@ -1,5 +1,6 @@
+ # part of code modified from https://github.com/tunib-ai/parallelformers
+ 
++import warnings
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass
+ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+@@ -9,6 +10,7 @@ import torch.nn as nn
+ from torch import Tensor
+ from torch.nn import Module
+ 
++from colossalai.legacy.core import global_context as gpc
+ from colossalai.pipeline.stage_manager import PipelineStageManager
+ 
+ from ..layer.normalization import BaseLayerNorm
+@@ -199,6 +201,12 @@ class Policy(ABC):
+ 
+     @staticmethod
+     def distribute_layers(num_layers: int, num_stages: int) -> List[int]:
++        if hasattr(gpc, "llama_pp_shard_config"):
++            warnings.warn("Using llama_pp_shard_config from global context")
++            assert gpc.llama_pp_shard_config["num_devices"] == num_stages
++            assert gpc.llama_pp_shard_config["num_layers"] == num_layers
++            return gpc.llama_pp_shard_config["num_layers_per_device"]
++
+         """Divide layers into stages"""
+         quotient = num_layers // num_stages
+         remainder = num_layers % num_stages
