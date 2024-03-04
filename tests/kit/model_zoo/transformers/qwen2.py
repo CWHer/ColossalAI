@@ -51,7 +51,7 @@ if HAS_QWEN2:
         intermediate_size=256,
         max_window_layers=4,
         num_attention_heads=16,
-        num_hidden_layers=24,
+        num_hidden_layers=4,
         num_key_value_heads=16,
     )
 
