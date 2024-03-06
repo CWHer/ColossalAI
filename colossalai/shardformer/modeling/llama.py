@@ -441,16 +441,115 @@ class LlamaPipelineForwards:
 
 
 def get_llama_flash_attention_forward(shard_config: ShardConfig):
+    import math
+
     from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb
 
-    from colossalai.nn.layer.colo_attention import AttnMaskType, ColoAttention
-
-    llama_version = 2
     try:
         from transformers.models.llama.modeling_llama import repeat_kv
     except:
         warnings.warn("using llamav1, llamav1 hasn't repeat_kv function")
-        llama_version = 1
+
+    from flash_attn import flash_attn_varlen_func, flash_attn_varlen_qkvpacked_func
+
+    def llama_packed_flash_attention(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ):
+        assert (
+            self.num_heads == self.num_key_value_heads
+        ), "To use packed qkv attention, num_heads and num_key_value_heads should be the same"
+        use_cache = False  # Not using KV Cache
+        bsz, seq_len, _ = hidden_states.size()
+        scale = 1 / math.sqrt(self.hidden_size // self.num_heads)
+
+        query_states = self.q_proj(hidden_states).view(bsz, seq_len, self.num_heads, self.head_dim)
+        key_states = self.k_proj(hidden_states).view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+        value_states = self.v_proj(hidden_states).view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
+
+        # [B, S, H, D] -> [B, S, 3, H, D]
+        qkv_states = torch.stack((query_states, key_states, value_states), dim=2)
+
+        # Do RoPE
+        qkv_states = self.rotary_emb(qkv_states)
+
+        # Do qkv packed flash attention
+        cu_seqlens = torch.arange(0, (bsz + 1) * seq_len, seq_len, device=hidden_states.device, dtype=torch.int32)
+        attn_output = flash_attn_varlen_qkvpacked_func(
+            qkv_states.flatten(0, 1), cu_seqlens=cu_seqlens, max_seqlen=seq_len, softmax_scale=scale, causal=True
+        )
+
+        attn_output = attn_output.view(bsz, seq_len, self.hidden_size)
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, None
+
+    def llama_flash_attention(
+        self: LlamaAttention,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        output_attentions: bool = False,
+        use_cache: bool = False,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        bsz, seq_len, _ = hidden_states.size()
+
+        query_states = self.q_proj(hidden_states).view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        key_states = (
+            self.k_proj(hidden_states).view(bsz, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        )
+        value_states = (
+            self.v_proj(hidden_states).view(bsz, seq_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        )
+
+        kv_seq_len = key_states.shape[-2]
+        if past_key_value is not None:
+            kv_seq_len += past_key_value[0].shape[-2]
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        # [bsz, nh, t, hd]
+
+        if past_key_value is not None:
+            # reuse k, v, self_attention
+            key_states = torch.cat([past_key_value[0], key_states], dim=2)
+            value_states = torch.cat([past_key_value[1], value_states], dim=2)
+
+        past_key_value = (key_states, value_states) if use_cache else None
+
+        # repeat k/v heads if n_kv_heads < n_heads
+        key_states = repeat_kv(key_states, self.num_key_value_groups)
+        value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+        # q, k, v is [B, H, S, K] and xformers need [B, S, H, K]. returns [B, S, H, K]
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
+        value_states = value_states.transpose(1, 2)
+        cu_seqlens_q = torch.arange(0, (bsz + 1) * seq_len, seq_len, device=query_states.device, dtype=torch.int32)
+        cu_seqlens_k = torch.arange(0, (bsz + 1) * kv_seq_len, kv_seq_len, device=key_states.device, dtype=torch.int32)
+        attn_output = flash_attn_varlen_func(
+            query_states.flatten(0, 1),
+            key_states.flatten(0, 1),
+            value_states.flatten(0, 1),
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_k=cu_seqlens_k,
+            max_seqlen_q=seq_len,
+            max_seqlen_k=kv_seq_len,
+            causal=True,
+        )
+
+        attn_output = attn_output.reshape(bsz, seq_len, self.hidden_size)
+
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None, past_key_value
 
     def forward(
         self: LlamaAttention,
@@ -462,61 +561,37 @@ def get_llama_flash_attention_forward(shard_config: ShardConfig):
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
-        assert q_len % 4 == 0, "Flash Attention Error: The sequence length should be a multiple of 4."
+        logger = logging.get_logger(__name__)
 
-        query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        if self.num_heads == self.num_key_value_heads:
+            from flash_attn.layers.rotary import RotaryEmbedding
 
-        kv_seq_len = key_states.shape[-2]
-        if past_key_value is not None:
-            kv_seq_len += past_key_value[0].shape[-2]
-
-        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
-        if past_key_value is not None:
-            # reuse k, v, self_attention
-            key_states = torch.cat([past_key_value[0], key_states], dim=2)
-            value_states = torch.cat([past_key_value[1], value_states], dim=2)
-
-        past_key_value = (key_states, value_states) if use_cache else None
-
-        # repeat k/v heads if n_kv_heads < n_heads
-        if llama_version == 2:
-            key_states = repeat_kv(key_states, self.num_key_value_groups)
-            value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        me_input_shape = (bsz, q_len, self.num_heads, self.head_dim)
-        query_states = query_states.transpose(1, 2).contiguous().view(*me_input_shape)
-        key_states = key_states.transpose(1, 2).contiguous().view(*me_input_shape)
-        value_states = value_states.transpose(1, 2).contiguous().view(*me_input_shape)
-
-        flash_attention_mask = None
-        attn_mask_type = AttnMaskType.causal
-        if not getattr(shard_config, "causal_lm", False) and attention_mask != None:
-            if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, q_len, kv_seq_len)}, but is {attention_mask.size()}"
-                )
-            flash_attention_mask = ~(attention_mask[:, :, -1].squeeze(1).to(torch.bool)).contiguous()
-            attn_mask_type = AttnMaskType.paddedcausal
-
-        attention = ColoAttention(embed_dim=self.hidden_size, num_heads=self.num_heads)
-        attn_output = attention(
-            query_states,
-            key_states,
-            value_states,
-            attn_mask=flash_attention_mask,
-            attn_mask_type=attn_mask_type,
-            origin_attn_mask=attention_mask,
-        )
-
-        attn_output = self.o_proj(attn_output)
-
-        return attn_output, None, past_key_value
+            self.rotary_emb = RotaryEmbedding(
+                self.hidden_size // self.num_heads, device=torch.device(f"cuda:{torch.cuda.current_device()}")
+            )
+            logger.warning_once("Using packed qkv attention")
+            return llama_packed_flash_attention(
+                self,
+                hidden_states,
+                attention_mask,
+                position_ids,
+                past_key_value,
+                output_attentions,
+                use_cache,
+                **kwargs,
+            )
+        else:
+            logger.warning_once("Use flash attention")
+            return llama_flash_attention(
+                self,
+                hidden_states,
+                attention_mask,
+                position_ids,
+                past_key_value,
+                output_attentions,
+                use_cache,
+                **kwargs,
+            )
 
     return forward
 
