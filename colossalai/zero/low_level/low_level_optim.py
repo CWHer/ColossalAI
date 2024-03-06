@@ -616,6 +616,7 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
                 # HACK: skip None grad
                 self.optim.step()
 
+                d2h_stream.wait_stream(torch.cuda.current_stream())
                 splited_param.grad = None
 
             # update the params in the optimizer
