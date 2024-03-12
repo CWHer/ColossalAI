@@ -53,6 +53,7 @@ if HAS_LLAMA:
         hidden_size=128,
         intermediate_size=256,
         num_attention_heads=4,
+        num_key_value_heads=2,
         max_position_embeddings=128,
         num_labels=16,
     )

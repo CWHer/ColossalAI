@@ -468,8 +468,8 @@ def get_llama_flash_attention_forward(shard_config: ShardConfig):
         value_states = self.v_proj(hidden_states).view(bsz, seq_len, self.num_key_value_heads, self.head_dim)
 
         # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+        key_states = repeat_kv(key_states.transpose(1, 2), self.num_key_value_groups).transpose(1, 2)
+        value_states = repeat_kv(value_states.transpose(1, 2), self.num_key_value_groups).transpose(1, 2)
 
         qkv_states = torch.stack((query_states, key_states, value_states), dim=2)
 
