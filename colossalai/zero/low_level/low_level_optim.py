@@ -2,7 +2,7 @@
 import copy
 from contextlib import contextmanager
 from functools import partial
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
@@ -530,6 +530,26 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
     ####################
 
     def step(self, closure=None):
+        class DataPrefetcher:
+            def __init__(self, loader: Iterable):
+                self.loader = iter(loader)
+                self.stream = torch.cuda.Stream()
+                self.preload()
+
+            def next(self):
+                self.stream.synchronize()
+                data = self.data
+                self.preload()
+                return data
+
+            def preload(self):
+                try:
+                    with torch.cuda.stream(self.stream):
+                        self.data = next(self.loader)
+                except StopIteration:
+                    self.data = None
+                    return
+
         assert closure is None, "closure is not supported by step()"
         if not self.require_grad_sync:
             return
@@ -562,20 +582,8 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
                 # else the splited grad should be attached to the splited param
                 grads = self._grad_store.get_partitioned_gradients_by_param_id(group_id, id(working_param))
                 if len(grads) > 0:
-                    # moe hybrid zero
-                    if self.moe_extra_dp_pg is not None and is_moe_tensor(working_param):
-                        real_working_params[group_id].append(working_param)
-                        if self._partition_grads:
-                            grad = grads
-                        else:
-                            param_slice = self._world_size // self.moe_extra_dp_pg_size
-                            grad = grads[
-                                self.moe_extra_dp_pg_rank * param_slice : (self.moe_extra_dp_pg_rank + 1) * param_slice
-                            ]
-                        grad = flatten(grad)
-                    else:
-                        real_working_params[group_id].append(working_param)
-                        grad = grads[grad_index]
+                    real_working_params[group_id].append(working_param)
+                    grad = grads[grad_index]
                     # no need to copy fp32 grad if master_weights is False
                     grad_partition_groups.append(grad)
                     real_master_params[group_id].append(splited_param)
@@ -594,79 +602,63 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         global_norm = calculate_global_norm_from_list(norm_list=norm_groups)
         self._unscale_and_clip_grads(grad_partition_groups, global_norm)
 
-        d2h_stream = torch.cuda.Stream()
+        device = get_accelerator().get_current_device()
         for group_id in range(self.num_param_groups):
-            if len(real_master_params[group_id]) > 0:
-                next_grad = grad_partition_groups.pop(0)
-                if self._master_weights:
-                    next_grad = next_grad.to(real_master_params[group_id][0].dtype).to(
-                        real_master_params[group_id][0].device
+
+            def load_grad(num: int):
+                for _ in range(num):
+                    grad = grad_partition_groups.pop(0)
+                    if self._master_weights:
+                        grad = grad.to(real_master_params[group_id][0].dtype).to(
+                            real_master_params[group_id][0].device, non_blocking=True
+                        )
+                    yield grad
+
+            def load_param(num: int):
+                for i in range(num):
+                    splited_param = (
+                        self.optim.param_groups[group_id]["params"][i].to(device, non_blocking=True).to(self._dtype)
                     )
+                    yield splited_param
 
-            for idx, splited_param in enumerate(real_master_params[group_id]):
-                splited_param.grad = next_grad
+            grad_pre_fetcher = DataPrefetcher(load_grad(len(real_master_params[group_id])))
+            param_pre_fetcher = None
 
-                torch.cuda.current_stream().wait_stream(d2h_stream)
-                if idx < len(real_master_params[group_id]) - 1:
-                    with torch.cuda.stream(d2h_stream):
-                        next_grad = grad_partition_groups.pop(0)
-                        if self._master_weights:
-                            next_grad = next_grad.to(splited_param.dtype).to(splited_param.device, non_blocking=True)
-                # update the parameters
-                # HACK: skip None grad
-                self.optim.step()
+            for idx in range(len(real_master_params[group_id]) + 1):
+                if idx < len(real_master_params[group_id]):
+                    real_master_params[group_id][idx].grad = grad_pre_fetcher.next()
 
-                d2h_stream.wait_stream(torch.cuda.current_stream())
-                splited_param.grad = None
+                    # update the parameters
+                    # HACK: skip None grad
+                    self.optim.step()
+
+                    real_master_params[group_id][idx].grad = None
+                    torch.cuda.current_stream().synchronize()
+
+                if idx > 0:
+                    if param_pre_fetcher is None:
+                        param_pre_fetcher = DataPrefetcher(load_param(len(real_master_params[group_id])))
+                    working_param = real_working_params[group_id][idx - 1]
+                    splited_param = param_pre_fetcher.next()
+
+                    all_splited_param = [
+                        torch.zeros(splited_param.shape, device=device, dtype=self._dtype)
+                        for _ in range(self._world_size)
+                    ]
+                    dist.all_gather(all_splited_param, splited_param, group=self.dp_pg)
+
+                    working_param.data.copy_(
+                        flatten(all_splited_param)[: working_param.numel()].reshape_as(working_param)
+                    )
+                    torch.cuda.current_stream().synchronize()
 
             # update the params in the optimizer
-            # self.optim.param_groups[group_id]["params"] = real_master_params[group_id]
-
-        # TODO: we should store master param for ep
-        # if len(self.param_groups) > len(self._working_param_groups):
-        #     for param in self.param_groups[-1]["params"]:
-        #         param.data = param.data.to(torch.float32)
-        #         param.grad = param.grad.to(torch.float32)
-
-        # update the parameters
-        # self.optim.step()
-
-        # release the moe gradm
-        # if len(self.param_groups) > len(self._working_param_groups):
-        #     for param in self.param_groups[-1]["params"]:
-        #         param.grad = None
-        #         param.data = param.data.to(self._dtype)
+            self.optim.param_groups[group_id]["params"] = real_master_params[group_id]
 
         # release the grad
         grad_partition_groups = []
         for group_id in range(self.num_param_groups):
             release_param_grad(self._master_param_groups_of_current_rank[group_id])
-
-        # update working partition updated by the current rank
-        h2d_stream = torch.cuda.Stream()
-        device = get_accelerator().get_current_device()
-        for group_id in range(self.num_param_groups):
-            master_working_param = self.optim.param_groups[group_id]["params"]
-            if len(master_working_param) > 0:
-                next_splited_param = master_working_param[0].to(device).to(self._dtype)
-
-            for idx in range(len(master_working_param)):
-                working_param = real_working_params[group_id][idx]
-
-                h2d_stream.wait_stream(torch.cuda.current_stream())
-                splited_param = next_splited_param
-                if idx < len(master_working_param) - 1:
-                    with torch.cuda.stream(h2d_stream):
-                        next_splited_param = master_working_param[idx + 1].to(device, non_blocking=True).to(self._dtype)
-
-                all_splited_param = [
-                    torch.zeros(splited_param.shape, device=device, dtype=self._dtype) for _ in range(self._world_size)
-                ]
-                dist.all_gather(all_splited_param, splited_param, group=self.dp_pg)
-                working_param.data.copy_(flatten(all_splited_param)[: working_param.numel()].reshape_as(working_param))
-                torch.cuda.current_stream().wait_stream(h2d_stream)
-
-            self.optim.param_groups[group_id]["params"] = self._master_param_groups_of_current_rank[group_id]
 
     def _compute_grad_norm(self, gradients: List[Tensor], norm_type: int = 2) -> float:
         r"""
@@ -919,3 +911,4 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
 
     def get_master_to_working_map(self) -> Dict[int, torch.Tensor]:
         return self._param_store.master_to_working_param
+
