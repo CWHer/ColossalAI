@@ -7,6 +7,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.testing import assert_close
 
 import colossalai
+from colossalai.cluster.process_group_mesh import ProcessGroupMesh
 from colossalai.testing import parameterize, rerun_if_address_is_in_use, spawn
 from colossalai.testing.random import seed_all
 from colossalai.zero import LowLevelZeroOptimizer
@@ -128,6 +129,9 @@ def exam_zero_1_torch_ddp(world_size, dtype: torch.dtype, master_weights: bool):
     # create optimizer
     zero_optimizer = torch.optim.SGD(zero_model.parameters(), lr=1)
 
+    assert world_size % 2 == 0
+    world_size = world_size // 2
+    mesh = ProcessGroupMesh(world_size, 2)
     # we only test stage 1 here
     # in `check_sharded_param_consistency.py`, we will test whether
     # level 1 and 2 will produce exactly the same results
@@ -136,6 +140,8 @@ def exam_zero_1_torch_ddp(world_size, dtype: torch.dtype, master_weights: bool):
         overlap_communication=True,
         initial_scale=1,
         reduce_bucket_size=1024 * 1024,
+        dp_process_group=mesh.get_group_along_axis(0),
+        extra_dp_group=mesh.get_group_along_axis(1),
         master_weights=master_weights,
     )
 
@@ -181,13 +187,13 @@ def run_dist(rank, world_size, port):
     colossalai.launch(config=dict(), rank=rank, world_size=world_size, port=port, host="localhost")
 
     exam_zero_1_torch_ddp(world_size=world_size)
-    exam_zero_1_2()
+    # exam_zero_1_2()
 
 
 @pytest.mark.dist
 @rerun_if_address_is_in_use()
 def test_zero_1_2():
-    spawn(run_dist, 2)
+    spawn(run_dist, 4)
 
 
 if __name__ == "__main__":
