@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from functools import partial
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -72,7 +73,7 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         partition_grad: bool = False,  # stage 2 flag
         cpu_offload: bool = False,  # cpu offload
         dp_process_group: Optional[ProcessGroup] = None,  # the dp pg for comm
-        extra_dp_group: Optional[ProcessGroup] = None,  # enable cases like DP4-PP8 * 4, i.e., scale the entire 32 GPU
+        extra_dp_size: int = 1,  # enable cases like DP4-PP8 * 4, i.e., scale the entire 32 GPU
         forced_dtype: Optional[torch.dtype] = None,
         moe_extra_dp_process_group: Optional[ProcessGroup] = None,
         master_weights: bool = True,  # master weights
@@ -93,11 +94,32 @@ class LowLevelZeroOptimizer(OptimizerWrapper):
         self.require_grad_sync = True
 
         # if process_group is none, will use the default one
-        self.dp_pg = dp_process_group
+        if dp_process_group is None:
+            dp_process_group = dist.group.WORLD
+        ranks = dist.get_process_group_ranks(group=dp_process_group)
+        assert dist.get_world_size(group=dp_process_group) % extra_dp_size == 0
+        ranks = np.array(ranks).reshape(extra_dp_size, -1)
+        extra_dp_id = dist.get_rank(group=dp_process_group) % (
+            dist.get_world_size(group=dp_process_group) // extra_dp_size
+        )
+        zero_id = dist.get_rank(group=dp_process_group) // (
+            dist.get_world_size(group=dp_process_group) // extra_dp_size
+        )
+
+        for i in range(extra_dp_size):
+            group = dist.new_group(ranks[i])
+            if i == zero_id:
+                self.dp_pg = group
         self._local_rank = dist.get_rank(group=self.dp_pg)
         self._world_size = dist.get_world_size(group=self.dp_pg)
 
-        self.extra_dp_pg = extra_dp_group
+        if extra_dp_size == 1:
+            self.extra_dp_pg = None
+        else:
+            for i in range(self._world_size):
+                group = dist.new_group(ranks[:, i])
+                if i == extra_dp_id:
+                    self.extra_dp_pg = group
         if self.extra_dp_pg is not None:
             self.extra_dp_pg_size = dist.get_world_size(group=self.extra_dp_pg)
             self.extra_dp_pg_rank = dist.get_rank(group=self.extra_dp_pg)

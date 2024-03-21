@@ -129,9 +129,9 @@ def exam_zero_1_torch_ddp(world_size, dtype: torch.dtype, master_weights: bool):
     # create optimizer
     zero_optimizer = torch.optim.SGD(zero_model.parameters(), lr=1)
 
-    assert world_size % 2 == 0
-    world_size = world_size // 2
-    mesh = ProcessGroupMesh(world_size, 2)
+    extra_dp_size = 2
+    assert world_size % extra_dp_size == 0
+    mesh = ProcessGroupMesh(world_size)
     # we only test stage 1 here
     # in `check_sharded_param_consistency.py`, we will test whether
     # level 1 and 2 will produce exactly the same results
@@ -141,7 +141,7 @@ def exam_zero_1_torch_ddp(world_size, dtype: torch.dtype, master_weights: bool):
         initial_scale=1,
         reduce_bucket_size=1024 * 1024,
         dp_process_group=mesh.get_group_along_axis(0),
-        extra_dp_group=mesh.get_group_along_axis(1),
+        extra_dp_size=extra_dp_size,
         master_weights=master_weights,
     )
 
@@ -168,7 +168,7 @@ def exam_zero_1_torch_ddp(world_size, dtype: torch.dtype, master_weights: bool):
     for (n, p), z1p in zip(torch_model.named_parameters(), zero_model.parameters()):
         if p.grad is not None:
             zero_grad_list = zero_optimizer._grad_store.get_partitioned_gradients_by_param_id(0, id(z1p))
-            torch_grad_list = split_ddp_grad(p.grad, world_size)
+            torch_grad_list = split_ddp_grad(p.grad, world_size // extra_dp_size)
             for zero_grad, torch_grad in zip(zero_grad_list, torch_grad_list):
                 loose_close(zero_grad, torch_grad, dtype=dtype)
 

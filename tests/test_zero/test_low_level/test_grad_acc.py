@@ -87,8 +87,9 @@ def exam_zero_1_grad_acc(sync):
     zero_optimizer = torch.optim.Adam(zero_model.parameters(), lr=1)
 
     world_size = torch.distributed.get_world_size()
-    assert world_size % 2 == 0
-    mesh = ProcessGroupMesh(world_size // 2, 2)
+    extra_dp_size = 2
+    assert world_size % extra_dp_size == 0
+    mesh = ProcessGroupMesh(world_size)
     # we only test stage 1 here
     # in `check_sharded_param_consistency.py`, we will test whether
     # level 1 and 2 will produce exactly the same results
@@ -98,7 +99,7 @@ def exam_zero_1_grad_acc(sync):
         reduce_bucket_size=262144,
         clip_grad_norm=1.0,
         dp_process_group=mesh.get_group_along_axis(0),
-        extra_dp_group=mesh.get_group_along_axis(1),
+        extra_dp_size=extra_dp_size
     )
 
     torch_optimizer = torch.optim.Adam(torch_model.parameters(), lr=1)
