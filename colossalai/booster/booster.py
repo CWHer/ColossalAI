@@ -103,7 +103,8 @@ class Booster:
                 )
 
         if self.plugin is not None and self.plugin.control_checkpoint_io():
-            self.checkpoint_io = self.plugin.get_checkpoint_io()
+            self.checkpoint_io = None
+            # self.checkpoint_io = self.plugin.get_checkpoint_io()
         else:
             self.checkpoint_io = GeneralCheckpointIO()
 

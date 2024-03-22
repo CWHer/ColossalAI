@@ -34,7 +34,7 @@ from colossalai.zero.low_level import LowLevelZeroOptimizer
 
 from .pp_plugin_base import PipelinePluginBase
 
-DP_AXIS, PP_AXIS, TP_AXIS = 1, 0, 2
+EXTRA_DP_AXIS, DP_AXIS, PP_AXIS, TP_AXIS = 1, 2, 0, 3
 
 
 def _convert_floating_point(x, dtype: torch.dtype = torch.float16):
@@ -92,6 +92,7 @@ class HybridParallelModule(ModelWrapper, AMPModelMixin):
 
         # setting ddp configs
         if use_ddp:
+            raise NotImplementedError()
             # convert model to sync bn
             module = SyncBatchNorm.convert_sync_batchnorm(module, dp_group)
             # wrap the model with PyTorch DDP
@@ -140,7 +141,7 @@ class HybridParallelModule(ModelWrapper, AMPModelMixin):
         Returns:
             None
         """
-
+        raise NotImplementedError()
         # Check if the DP group size is 1, meaning no synchronization is needed.
         if self.dp_group.size() == 1:
             return
@@ -631,6 +632,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
         tp_process_group: Optional[ProcessGroup] = None,  # if using tp
         pp_process_group: Optional[ProcessGroup] = None,  # if using pp
         forced_dtype: Optional[torch.dtype] = None,
+        extra_dp_group: Optional[ProcessGroup] = None,
     ):
         self.model = model
         self.param_info = param_info
@@ -658,6 +660,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             partition_grad=partition_grad,
             cpu_offload=cpu_offload,
             dp_process_group=dp_process_group,
+            extra_dp_group=extra_dp_group,
             forced_dtype=forced_dtype,
         )
 
@@ -793,6 +796,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
         if len(gradients) == 0:
             return 0.0
 
+        extra_dp_size = get_world_size(self.extra_dp_pg) if self.extra_dp_pg is not None else 1
         dp_size = get_world_size(self.dp_pg) if self.dp_pg is not None else 1
         tp_size = get_world_size(self.tp_pg) if self.tp_pg is not None else 1
         pp_size = get_world_size(self.pp_pg) if self.pp_pg is not None else 1
@@ -847,6 +851,9 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             total_norm_exponentiated_cuda = torch.tensor(
                 [float(total_norm_exponentiated)], device=get_accelerator().get_current_device(), dtype=torch.float32
             )
+            if extra_dp_size > 1:
+                # compute norm in extra dp process group
+                dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.extra_dp_pg)
             if dp_size > 1:
                 # compute norm in dp process group
                 dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.dp_pg)
@@ -929,6 +936,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         self,
         tp_size: int,
         pp_size: int,
+        extra_dp_size: int = 1,
         precision: str = "fp16",
         zero_stage: int = 0,
         enable_all_optimization: bool = False,
@@ -964,15 +972,17 @@ class HybridParallelPlugin(PipelinePluginBase):
     ) -> None:
         super().__init__()
         assert (
-            dist.get_world_size() % (tp_size * pp_size) == 0
-        ), f"world size {dist.get_world_size()} is not divisible by tp_size {tp_size} * pp_size {pp_size}"
+            dist.get_world_size() % (tp_size * pp_size * extra_dp_size) == 0
+        ), f"world size {dist.get_world_size()} is not divisible by tp_size {tp_size} * pp_size {pp_size} * extra_dp_size {extra_dp_size}"
 
         if enable_sequence_parallelism:
             assert tp_size > 1, "Sequence parallelism must be enabled when using tensor parallelism"
 
         self.tp_size = tp_size
         self.pp_size = pp_size
-        self.dp_size = dist.get_world_size() // (tp_size * pp_size)
+        self.extra_dp_size = extra_dp_size
+        self.dp_size = dist.get_world_size() // (tp_size * pp_size * extra_dp_size)
+
         self.precision = precision
         self.zero_stage = zero_stage
         self.cpu_offload = cpu_offload
@@ -981,7 +991,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         self.enable_flash_attention = enable_flash_attention
         self.enable_jit_fused = enable_jit_fused
         self.enable_sequence_parallelism = enable_sequence_parallelism
-        self.pg_mesh = ProcessGroupMesh(self.pp_size, self.dp_size, self.tp_size)
+        self.pg_mesh = ProcessGroupMesh(self.pp_size, self.extra_dp_size, self.dp_size, self.tp_size)
         self.stage_manager = None
         self.schedule = None
         self.custom_policy = custom_policy
@@ -1021,6 +1031,7 @@ class HybridParallelPlugin(PipelinePluginBase):
 
         self.tp_group = self.pg_mesh.get_group_along_axis(TP_AXIS)
         self.dp_group = self.pg_mesh.get_group_along_axis(DP_AXIS)
+        self.extra_dp_group = self.pg_mesh.get_group_along_axis(EXTRA_DP_AXIS)
         self.pp_group = self.pg_mesh.get_group_along_axis(PP_AXIS)
 
         self.shard_config = ShardConfig(
@@ -1100,6 +1111,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         param_info = get_param_info(optimizer)
         if not isinstance(model, ModelWrapper):
             use_ddp = self.dp_size > 1 and self.pp_size == 1 and self.zero_stage == 0
+            assert not use_ddp, "Not implemented"
             model = HybridParallelModule(
                 model,
                 precision=self.precision,
@@ -1150,6 +1162,7 @@ class HybridParallelPlugin(PipelinePluginBase):
                     dp_process_group=self.dp_group,
                     tp_process_group=self.tp_group,
                     pp_process_group=self.pp_group,
+                    extra_dp_group=self.extra_dp_group,
                     verbose=True,
                     clip_grad_norm=self.max_norm,
                     **self.zero_config,
@@ -1229,8 +1242,14 @@ class HybridParallelPlugin(PipelinePluginBase):
             :class:`torch.utils.data.DataLoader`: A DataLoader used for training or testing.
         """
         _kwargs = kwargs.copy()
+        rank0 = self.pg_mesh.coordinate(DP_AXIS)
+        rank1 = self.pg_mesh.coordinate(EXTRA_DP_AXIS)
+        rank = rank0 * self.pg_mesh.size(EXTRA_DP_AXIS) + rank1
         sampler = DistributedSampler(
-            dataset, num_replicas=self.pg_mesh.size(DP_AXIS), rank=self.pg_mesh.coordinate(DP_AXIS), shuffle=shuffle
+            dataset,
+            num_replicas=self.pg_mesh.size(DP_AXIS) * self.pg_mesh.size(EXTRA_DP_AXIS),
+            rank=rank,
+            shuffle=shuffle,
         )
 
         # Deterministic dataloader
@@ -1252,6 +1271,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         )
 
     def get_checkpoint_io(self) -> CheckpointIO:
+        raise NotImplementedError()
         return HybridParallelCheckpointIO(self.dp_group, self.pp_group, self.tp_group, self.zero_stage)
 
     def no_sync(self, model: Module, optimizer: OptimizerWrapper) -> Iterator[None]:
